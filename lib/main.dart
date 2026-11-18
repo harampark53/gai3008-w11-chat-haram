@@ -31,11 +31,33 @@ class ChatMessage {
   final bool isUser;
 }
 
+/// 실습 4 — 서버가 돌려준 HTTP 상태 코드를 담는 오류
+class AiException implements Exception {
+  const AiException(this.status);
+
+  final int status; // 401, 429, 500 ...
+}
+
 /// AI 호출 담당. 아직 서버(프록시)가 없어서 1.5초 뒤 가짜 답을 돌려준다.
 /// 나중에 실제 서버를 붙일 때는 chat() 안만 바꾸면 된다.
+///
+/// 실습 4 시험용 — 메시지에 아래 글자를 넣으면 그 오류를 흉내 낸다.
+/// 처음 한 번만 실패하고, 다시 시도하면 성공한다.
+///   /401  /429  /500  /timeout
 class AiClient {
+  final _failedOnce = <String>{}; // 이미 한 번 실패한 메시지
+
   Future<String> chat(String text) async {
     await Future.delayed(const Duration(milliseconds: 1500));
+    final firstTry = _failedOnce.add(text); // 처음이면 true
+    if (firstTry) {
+      if (text.contains('/timeout')) {
+        await Future.delayed(const Duration(seconds: 10)); // 응답 없음
+      }
+      for (final code in [401, 429, 500]) {
+        if (text.contains('/$code')) throw AiException(code);
+      }
+    }
     return '"$text"에 대한 답변이에요.';
   }
 }
@@ -63,6 +85,10 @@ class _ChatPageState extends State<ChatPage> {
   bool _sending = false; // 보내는 중 → 입력 잠금
   bool _typing = false; // AI가 답을 쓰는 중 → 점 3개
 
+  // 실습 4
+  String? _error; // 화면에 남길 오류 문구 (null이면 오류 없음)
+  String? _lastText; // 다시 시도할 마지막 메시지
+
   @override
   void dispose() {
     // 화면이 사라질 때 컨트롤러도 정리 (메모리 누수 방지)
@@ -70,28 +96,48 @@ class _ChatPageState extends State<ChatPage> {
     super.dispose();
   }
 
-  /// 내 메시지를 추가하고, AI 답을 기다렸다가 AI 말풍선으로 추가한다
+  /// 내 메시지를 추가하고 AI에게 묻는다
   Future<void> _send() async {
     final text = _controller.text.trim();
     // 빈 칸이거나 이미 보내는 중이면 무시 → 연타해도 한 번만 전송
     if (text.isEmpty || _sending) return;
     _controller.clear();
 
-    // 1. 내 메시지를 먼저 추가 + 2. 입력 잠금, 점 3개 시작
+    setState(() => _messages.add(ChatMessage.user(text)));
+    await _ask(text);
+  }
+
+  /// 실습 4 — 3. 다시 시도는 마지막 메시지를 다시 보낸다
+  /// (내 말풍선은 이미 있으니 또 추가하지 않는다)
+  Future<void> _retry() async {
+    final text = _lastText;
+    if (text == null || _sending) return;
+    await _ask(text);
+  }
+
+  /// AI에게 묻고, 성공하면 AI 말풍선, 실패하면 오류 문구를 남긴다
+  Future<void> _ask(String text) async {
+    _lastText = text;
     setState(() {
-      _messages.add(ChatMessage.user(text));
       _sending = true;
       _typing = true;
+      _error = null; // 새로 시도하니 이전 오류는 지운다
     });
 
     try {
-      // 3. AI 호출 (끝날 때까지 기다림)
-      final answer = await _ai.chat(text);
-      if (!mounted) return; // 기다리는 사이 화면이 닫혔으면 중단
-      // 4. 답을 AI 말풍선으로 추가
+      // timeout: 5초 안에 답이 없으면 TimeoutException
+      final answer =
+          await _ai.chat(text).timeout(const Duration(seconds: 5));
+      if (!mounted) return;
       setState(() => _messages.add(ChatMessage.bot(answer)));
+    } on AiException catch (e) {
+      // 서버가 상태 코드로 실패를 알린 경우
+      if (mounted) setState(() => _error = _errorMessage(e.status));
+    } catch (_) {
+      // 시간 초과, 네트워크 끊김 등 — 상태 코드가 없는 경우
+      if (mounted) setState(() => _error = _errorMessage(null));
     } finally {
-      // 5. 성공이든 실패든 잠금과 점 3개를 끈다
+      // 성공이든 실패든 잠금 해제 → 오류 뒤에도 입력이 된다
       if (mounted) {
         setState(() {
           _sending = false;
@@ -100,6 +146,14 @@ class _ChatPageState extends State<ChatPage> {
       }
     }
   }
+
+  /// 실습 4 — 1. 401, 429, 500, timeout을 사용자가 할 일이 보이는 한 문장으로
+  String _errorMessage(int? status) => switch (status) {
+        401 => '키/권한을 확인해 주세요',
+        429 => '잠시 후 다시 시도해 주세요',
+        500 => '응답을 받지 못했습니다',
+        _ => '네트워크를 확인해 주세요',
+      };
 
   @override
   Widget build(BuildContext context) {
@@ -170,6 +224,17 @@ class _ChatPageState extends State<ChatPage> {
             //  · 보낼 때 _controller.clear() 하고 setState로 목록에 추가한다.
             //  · dispose()에서 _controller.dispose()를 잊지 않는다.
             // ─────────────────────────────────────────────────────────
+            // 실습 4 — 4. 오류 말풍선이 부드럽게 나타나고 사라진다
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: _error == null
+                  ? const SizedBox.shrink()
+                  : _ErrorBubble(
+                      key: ValueKey(_error),
+                      message: _error!,
+                      onRetry: _retry,
+                    ),
+            ),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
               child: Row(
@@ -317,6 +382,55 @@ class _TypingDotsState extends State<TypingDots>
               }),
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+/// 실습 4 — 2. 오류 말풍선 + 다시 시도
+class _ErrorBubble extends StatelessWidget {
+  const _ErrorBubble({
+    super.key,
+    required this.message,
+    required this.onRetry,
+  });
+
+  final String message;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+        constraints: const BoxConstraints(maxWidth: 420),
+        decoration: BoxDecoration(
+          color: colorScheme.errorContainer,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.error_outline,
+                size: 18, color: colorScheme.onErrorContainer),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                message,
+                style: TextStyle(color: colorScheme.onErrorContainer),
+              ),
+            ),
+            const SizedBox(width: 4),
+            TextButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('다시 시도'),
+            ),
+          ],
         ),
       ),
     );
