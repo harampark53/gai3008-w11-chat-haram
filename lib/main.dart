@@ -80,15 +80,30 @@ class _ChatPageState extends State<ChatPage> {
             //    · 그래서 _messages[length - 1 - i]로 거꾸로 꺼낸다.
             // ─────────────────────────────────────────────────────────
             Expanded(
-              child: ListView.builder(
-                reverse: true,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: _messages.length,
-                itemBuilder: (context, index) {
-                  final message =
-                      _messages[_messages.length - 1 - index];
-                  return _Bubble(message: message);
-                },
+              // TODO 4 — 목록 위에 빈 상태 문구를 겹쳐 놓는다
+              child: Stack(
+                children: [
+                  ListView.builder(
+                    reverse: true,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final message =
+                          _messages[_messages.length - 1 - index];
+                      return _Bubble(message: message);
+                    },
+                  ),
+                  // 목록이 비었을 때만 가운데에 보인다
+                  if (_messages.isEmpty)
+                    Center(
+                      child: Text(
+                        '무엇이든 물어보세요',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
 
