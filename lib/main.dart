@@ -23,8 +23,21 @@ class ChatLabApp extends StatelessWidget {
 class ChatMessage {
   const ChatMessage({required this.text, required this.isUser});
 
+  // 누가 보낸 말인지 이름으로 드러나게
+  const ChatMessage.user(this.text) : isUser = true;
+  const ChatMessage.bot(this.text) : isUser = false;
+
   final String text;
   final bool isUser;
+}
+
+/// AI 호출 담당. 아직 서버(프록시)가 없어서 1.5초 뒤 가짜 답을 돌려준다.
+/// 나중에 실제 서버를 붙일 때는 chat() 안만 바꾸면 된다.
+class AiClient {
+  Future<String> chat(String text) async {
+    await Future.delayed(const Duration(milliseconds: 1500));
+    return '"$text"에 대한 답변이에요.';
+  }
 }
 
 class ChatPage extends StatefulWidget {
@@ -46,6 +59,10 @@ class _ChatPageState extends State<ChatPage> {
   // TODO 3 — 입력창의 글자를 읽고 지우는 리모컨
   final _controller = TextEditingController();
 
+  final _ai = AiClient();
+  bool _sending = false; // 보내는 중 → 입력 잠금
+  bool _typing = false; // AI가 답을 쓰는 중 → 점 3개
+
   @override
   void dispose() {
     // 화면이 사라질 때 컨트롤러도 정리 (메모리 누수 방지)
@@ -53,14 +70,35 @@ class _ChatPageState extends State<ChatPage> {
     super.dispose();
   }
 
-  /// 입력창 글자를 내 말풍선으로 목록에 추가한다
-  void _send() {
+  /// 내 메시지를 추가하고, AI 답을 기다렸다가 AI 말풍선으로 추가한다
+  Future<void> _send() async {
     final text = _controller.text.trim();
-    if (text.isEmpty) return; // 빈 칸이면 보내지 않음
-    setState(() {
-      _messages.add(ChatMessage(text: text, isUser: true));
-    });
+    // 빈 칸이거나 이미 보내는 중이면 무시 → 연타해도 한 번만 전송
+    if (text.isEmpty || _sending) return;
     _controller.clear();
+
+    // 1. 내 메시지를 먼저 추가 + 2. 입력 잠금, 점 3개 시작
+    setState(() {
+      _messages.add(ChatMessage.user(text));
+      _sending = true;
+      _typing = true;
+    });
+
+    try {
+      // 3. AI 호출 (끝날 때까지 기다림)
+      final answer = await _ai.chat(text);
+      if (!mounted) return; // 기다리는 사이 화면이 닫혔으면 중단
+      // 4. 답을 AI 말풍선으로 추가
+      setState(() => _messages.add(ChatMessage.bot(answer)));
+    } finally {
+      // 5. 성공이든 실패든 잠금과 점 3개를 끈다
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _typing = false;
+        });
+      }
+    }
   }
 
   @override
@@ -88,15 +126,20 @@ class _ChatPageState extends State<ChatPage> {
                   ListView.builder(
                     reverse: true,
                     padding: const EdgeInsets.symmetric(vertical: 8),
-                    itemCount: _messages.length,
+                    // AI가 답을 쓰는 중이면 맨 아래(index 0)에 점 3개 한 칸 추가
+                    itemCount: _messages.length + (_typing ? 1 : 0),
                     itemBuilder: (context, index) {
+                      if (_typing) {
+                        if (index == 0) return const TypingDots();
+                        index -= 1; // 점 3개 자리만큼 한 칸 밀기
+                      }
                       final message =
                           _messages[_messages.length - 1 - index];
                       return _Bubble(message: message);
                     },
                   ),
                   // 목록이 비었을 때만 가운데에 보인다
-                  if (_messages.isEmpty)
+                  if (_messages.isEmpty && !_typing)
                     Center(
                       child: Text(
                         '무엇이든 물어보세요',
@@ -134,6 +177,7 @@ class _ChatPageState extends State<ChatPage> {
                   Expanded(
                     child: TextField(
                       controller: _controller,
+                      enabled: !_sending, // 보내는 중에는 입력 잠금
                       textInputAction: TextInputAction.send,
                       onSubmitted: (_) => _send(),
                       decoration: const InputDecoration(
@@ -146,7 +190,8 @@ class _ChatPageState extends State<ChatPage> {
                   const SizedBox(width: 8),
                   IconButton.filled(
                     icon: const Icon(Icons.send),
-                    onPressed: _send,
+                    // null이면 버튼이 회색으로 비활성
+                    onPressed: _sending ? null : _send,
                   ),
                 ],
               ),
@@ -209,6 +254,69 @@ class _Bubble extends StatelessWidget {
                 ? colorScheme.onPrimaryContainer
                 : colorScheme.onSurface,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// AI가 답을 쓰는 동안 왼쪽에 뜨는 점 3개
+/// 점이 200ms 간격으로 하나씩 차례로 진해진다
+class TypingDots extends StatefulWidget {
+  const TypingDots({super.key});
+
+  @override
+  State<TypingDots> createState() => _TypingDotsState();
+}
+
+class _TypingDotsState extends State<TypingDots>
+    with SingleTickerProviderStateMixin {
+  // 0 → 1을 600ms 동안 반복하는 시계 (점 하나에 200ms × 3개)
+  late final AnimationController _anim = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 600),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        decoration: BoxDecoration(
+          color: colorScheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        // 시계 값이 바뀔 때마다 점만 다시 그린다
+        child: AnimatedBuilder(
+          animation: _anim,
+          builder: (context, _) {
+            // 지금 진해질 점 번호: 0 → 1 → 2 → 0 ...
+            final active = (_anim.value * 3).floor() % 3;
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(3, (i) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 3),
+                  child: Opacity(
+                    opacity: i == active ? 1.0 : 0.3,
+                    child: CircleAvatar(
+                      radius: 4,
+                      backgroundColor: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                );
+              }),
+            );
+          },
         ),
       ),
     );
