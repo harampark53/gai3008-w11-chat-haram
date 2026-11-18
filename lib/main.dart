@@ -42,15 +42,19 @@ class AiException implements Exception {
 /// 나중에 실제 서버를 붙일 때는 chat() 안만 바꾸면 된다.
 ///
 /// 실습 4 시험용 — 메시지에 아래 글자를 넣으면 그 오류를 흉내 낸다.
-/// 처음 한 번만 실패하고, 다시 시도하면 성공한다.
-///   /401  /429  /500  /timeout
+///   /401 /500 /timeout : 처음 1번 실패, 다시 시도하면 성공
+///   /429               : 3번 연속 실패 (자동 재시도 1s → 2s까지 모두 실패)
+///                        → 오류 표시, 다시 시도하면 성공
 class AiClient {
-  final _failedOnce = <String>{}; // 이미 한 번 실패한 메시지
+  final _failCount = <String, int>{}; // 메시지별로 몇 번 실패했는지
 
   Future<String> chat(String text) async {
     await Future.delayed(const Duration(milliseconds: 1500));
-    final firstTry = _failedOnce.add(text); // 처음이면 true
-    if (firstTry) {
+    final count = _failCount[text] ?? 0; // 처음이면 0
+    final limit = text.contains('/429') ? 3 : 1; // 실패시킬 횟수
+
+    if (count < limit) {
+      _failCount[text] = count + 1;
       if (text.contains('/timeout')) {
         await Future.delayed(const Duration(seconds: 10)); // 응답 없음
       }
@@ -126,8 +130,7 @@ class _ChatPageState extends State<ChatPage> {
 
     try {
       // timeout: 5초 안에 답이 없으면 TimeoutException
-      final answer =
-          await _ai.chat(text).timeout(const Duration(seconds: 5));
+      final answer = await _chatWithBackoff(text);
       if (!mounted) return;
       setState(() => _messages.add(ChatMessage.bot(answer)));
     } on AiException catch (e) {
@@ -143,6 +146,23 @@ class _ChatPageState extends State<ChatPage> {
           _sending = false;
           _typing = false;
         });
+      }
+    }
+  }
+
+  /// 실습 4 — 5. 429(요청이 너무 많음)면 1초, 2초 기다렸다가 자동으로 다시 시도
+  /// (지수 백오프: 기다리는 시간을 매번 2배로)
+  Future<String> _chatWithBackoff(String text) async {
+    var delay = const Duration(seconds: 1);
+    for (var attempt = 0;; attempt++) {
+      try {
+        // timeout: 5초 안에 답이 없으면 TimeoutException
+        return await _ai.chat(text).timeout(const Duration(seconds: 5));
+      } on AiException catch (e) {
+        // 429가 아니거나, 이미 두 번 더 시도했으면 포기하고 바깥으로 던진다
+        if (e.status != 429 || attempt >= 2) rethrow;
+        await Future.delayed(delay); // 1초 → 2초
+        delay *= 2;
       }
     }
   }
